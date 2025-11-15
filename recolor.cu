@@ -1,4 +1,5 @@
 #include "recolor.h"
+#include <string>
 #include <curand_kernel.h>
 
 
@@ -12,7 +13,7 @@ __global__ void setup_kernel_randomness(curandState *state, unsigned long seed, 
 // CUDA kernel for recoloring
 __global__ void recolorKernel(unsigned char* input, unsigned char* output,
                                int width, int height, int channels,
-                               ColorMap* colorMaps, curandState* d_state) {
+                               ColorMap* colorMaps, curandState* d_state, int pixelDistance) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     
@@ -22,11 +23,12 @@ __global__ void recolorKernel(unsigned char* input, unsigned char* output,
     
     int thread_id = y * width + x;  // Simple linear index
 
-
-int pixelOffset = 20;
-// Calculate offset pixel position
-int x2 = curand(&d_state[thread_id]) % width;
-int y2 = curand(&d_state[thread_id]) % height;
+int min_val_x = max(x - pixelDistance, 0);
+int max_val_x = min(x + pixelDistance, width);
+int min_val_y = max(y - pixelDistance, 0);
+int max_val_y = min(y + pixelDistance, height);
+int x2 = min_val_x + (curand(&d_state[thread_id]) & (max_val_x - min_val_x + 1));
+int y2 = min_val_y + (curand(&d_state[thread_id]) & (max_val_y - min_val_y + 1));
 
 // Bounds check
 if (x2 >= 0 && x2 < width && y2 >= 0 && y2 < height) {
@@ -48,7 +50,7 @@ if (x2 >= 0 && x2 < width && y2 >= 0 && y2 < height) {
 // Kernel launcher
 void launchRecolorKernel(unsigned char* d_input, unsigned char* d_output,
                          int width, int height, int channels,
-                         ColorMap* d_colorMaps, int numMaps) {
+                         ColorMap* d_colorMaps, int pixelDistance) {
     // Configure kernel launch parameters
     dim3 blockSize(16, 16);  // 256 threads per block
     dim3 gridSize((width + blockSize.x - 1) / blockSize.x,
@@ -63,7 +65,7 @@ void launchRecolorKernel(unsigned char* d_input, unsigned char* d_output,
     
     // Launch kernel
     recolorKernel<<<gridSize, blockSize>>>(d_input, d_output, width, height,
-                                           channels, d_colorMaps, d_state);
+                                           channels, d_colorMaps, d_state, pixelDistance);
     
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -73,8 +75,8 @@ void launchRecolorKernel(unsigned char* d_input, unsigned char* d_output,
 
 // Main function
 int main(int argc, char** argv) {
-    if (argc != 3) {
-        fprintf(stderr, "Usage: %s <input_image> <output_image>\n", argv[0]);
+    if (argc != 4) {
+        fprintf(stderr, "Usage: %s <input_image> <output_image> <pixel_distance>\n", argv[0]);
         return 1;
     }
     
@@ -109,11 +111,13 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMalloc(&d_colorMaps, sizeof(ColorMap) * numMaps));
     CUDA_CHECK(cudaMemcpy(d_colorMaps, hostMaps, sizeof(ColorMap) * numMaps,
                           cudaMemcpyHostToDevice));
+
+    int pixelDistance = std::stoi(argv[3]);
     
     // Launch kernel
     printf("Processing image...\n");
     launchRecolorKernel(d_input, d_output, img->width, img->height,
-                        img->channels, d_colorMaps, numMaps);
+                        img->channels, d_colorMaps, pixelDistance);
     
     // Copy result back to host
     CUDA_CHECK(cudaMemcpy(img->data, d_output, imageSize, cudaMemcpyDeviceToHost));
